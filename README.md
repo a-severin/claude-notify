@@ -15,18 +15,6 @@ Linux desktop notifications for [Claude Code](https://docs.anthropic.com/en/docs
 - Linux with a desktop notification daemon (GNOME, KDE, dunst, mako, etc.)
 - Bash
 - `notify-send` from libnotify
-- `jq` (used by the installer to update Claude Code settings)
-
-```bash
-# Debian/Ubuntu
-sudo apt install jq libnotify-bin
-
-# Fedora
-sudo dnf install jq libnotify
-
-# Arch Linux
-sudo pacman -S jq libnotify
-```
 
 ## Quick Start
 
@@ -101,19 +89,19 @@ Claude Notify reads its configuration from `~/.config/claude-notify/config.json`
 
 ### Configuration Reference
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `icon` | string | `""` | Path to notification icon (supports `~` expansion) |
-| `notifications.*.enabled` | bool | `true` | Enable/disable a notification type |
-| `notifications.*.title` | string | varies | Notification title |
-| `notifications.*.message` | string | varies | Notification message body |
-| `notifications.*.urgency` | string | varies | Urgency: `low`, `normal`, `critical` |
-| `notifications.*.icon` | string | preset | Optional per-type icon override |
+| Option                    | Type   | Default | Description                                        |
+| ------------------------- | ------ | ------- | -------------------------------------------------- |
+| `icon`                    | string | `""`    | Path to notification icon (supports `~` expansion) |
+| `notifications.*.enabled` | bool   | `true`  | Enable/disable a notification type                 |
+| `notifications.*.title`   | string | varies  | Notification title                                 |
+| `notifications.*.message` | string | varies  | Notification message body                          |
+| `notifications.*.urgency` | string | varies  | Urgency: `low`, `normal`, `critical`               |
+| `notifications.*.icon`    | string | preset  | Optional per-type icon override                    |
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
+| Variable             | Description                         |
+| -------------------- | ----------------------------------- |
 | `CLAUDE_NOTIFY_ICON` | Override the notification icon path |
 
 ### Per-project configuration
@@ -133,10 +121,10 @@ Once installed, Claude Notify runs automatically through Claude Code's hooks. No
 
 ### Hook Events
 
-| Event | Trigger | Default Behavior |
-|-------|---------|------------------|
+| Event          | Trigger                 | Default Behavior     |
+| -------------- | ----------------------- | -------------------- |
 | `Notification` | Claude needs user input | Desktop notification |
-| `Stop` | Task completed | Desktop notification |
+| `Stop`         | Task completed          | Desktop notification |
 
 ### Manual Testing
 
