@@ -299,14 +299,44 @@ install_icon() {
     fi
 }
 
+# Merge one Claude Notify hook into the in-memory settings. Any earlier
+# Claude Notify handler for the same event is replaced; other hooks are kept.
+add_own_hook() {
+    local event="$1"
+    local matcher="$2"
+    local ntype="$3"
+    local cmd="$CONFIG_DIR/hooks/notify.sh --type $ntype"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        if [[ -n "$matcher" ]]; then
+            dry_run_msg "Add $event hook (matcher: $matcher): $cmd"
+        else
+            dry_run_msg "Add $event hook: $cmd"
+        fi
+        return 0
+    fi
+
+    new_settings=$(printf '%s' "$new_settings" | jq \
+        --arg event "$event" \
+        --arg matcher "$matcher" \
+        --arg cmd "$cmd" \
+        'def ours: [.hooks[]?.command] | map(tostring) | join(" ") | contains("claude-notify/hooks/notify.sh");
+         .hooks = (.hooks // {}) |
+         .hooks[$event] = (
+             [ (.hooks[$event] // [])[] | select(ours | not) ]
+             + [ { "matcher": $matcher, "hooks": [ { "type": "command", "command": $cmd } ] } ]
+         )')
+}
+
 # Configure Claude Code hooks
 configure_hooks() {
     info "Configuring Claude Code hooks..."
 
-    local notify_cmd="$CONFIG_DIR/hooks/notify.sh --type input"
-    local stop_cmd="$CONFIG_DIR/hooks/notify.sh --type complete"
+    if ! command -v jq &>/dev/null; then
+        error "jq is required to update Claude Code settings"
+        exit 1
+    fi
 
-    # Read current settings (treat a missing file as an empty object)
     local current_settings
     if [[ -f "$CLAUDE_SETTINGS" ]]; then
         current_settings=$(cat "$CLAUDE_SETTINGS")
@@ -314,72 +344,30 @@ configure_hooks() {
         current_settings='{}'
     fi
 
-    # Check if hooks already exist (skip prompts in dry-run mode)
-    if [[ "$DRY_RUN" != true ]]; then
-        if echo "$current_settings" | jq -e '.hooks.Notification' &>/dev/null; then
-            warn "Notification hook already exists in Claude Code settings"
-            read -p "Overwrite existing Notification hook? [y/N] " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                info "Keeping existing Notification hook"
-                notify_cmd=""
-            fi
-        fi
-
-        if echo "$current_settings" | jq -e '.hooks.Stop' &>/dev/null; then
-            warn "Stop hook already exists in Claude Code settings"
-            read -p "Overwrite existing Stop hook? [y/N] " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                info "Keeping existing Stop hook"
-                stop_cmd=""
-            fi
-        fi
+    if ! printf '%s' "$current_settings" | jq -e . &>/dev/null; then
+        error "Existing $CLAUDE_SETTINGS is not valid JSON"
+        exit 1
     fi
 
-    # Build the new hooks configuration
-    local new_settings="$current_settings"
+    new_settings="$current_settings"
 
-    if [[ -n "$notify_cmd" ]]; then
-        new_settings=$(echo "$new_settings" | jq --arg cmd "$notify_cmd" '
-            .hooks.Notification = [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": $cmd
-                        }
-                    ]
-                }
-            ]
-        ')
-    fi
+    # PermissionRequest fires immediately with the exact tool and command, so
+    # Notification excludes permission_prompt to avoid a duplicate alert.
+    add_own_hook "Notification" \
+        "idle_prompt|agent_needs_input|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled" \
+        "input"
+    add_own_hook "PermissionRequest" "" "input"
+    add_own_hook "Stop" "" "complete"
+    add_own_hook "StopFailure" "" "error"
+    add_own_hook "UserPromptSubmit" "" "prompt"
 
-    if [[ -n "$stop_cmd" ]]; then
-        new_settings=$(echo "$new_settings" | jq --arg cmd "$stop_cmd" '
-            .hooks.Stop = [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": $cmd
-                        }
-                    ]
-                }
-            ]
-        ')
+    if [[ "$DRY_RUN" == true ]]; then
+        info "Hooks would be merged into $CLAUDE_SETTINGS (other hooks preserved)"
+        return 0
     fi
 
     # Write updated settings
-    if [[ "$DRY_RUN" == true ]]; then
-        dry_run_msg "Update $CLAUDE_SETTINGS with hooks configuration"
-        info "Would add Notification hook: $notify_cmd"
-        info "Would add Stop hook: $stop_cmd"
-    else
-        echo "$new_settings" | jq '.' > "$CLAUDE_SETTINGS"
-    fi
+    printf '%s' "$new_settings" | jq '.' > "$CLAUDE_SETTINGS"
 
     success "Claude Code hooks configured"
 }

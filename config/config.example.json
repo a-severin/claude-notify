@@ -1,5 +1,13 @@
 {
   "icon": "~/.local/share/icons/claude-ai.png",
+  "context": {
+    "enabled": true,
+    "title_prefix": "Claude Code",
+    "show_branch": true,
+    "show_session": true,
+    "show_session_title": true,
+    "max_detail_length": 160
+  },
   "notifications": {
     "input_needed": {
       "enabled": true,

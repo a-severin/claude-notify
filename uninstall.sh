@@ -48,48 +48,47 @@ remove_hooks() {
     local current_settings
     current_settings=$(cat "$CLAUDE_SETTINGS")
 
-    # Check if our hooks exist
-    local notify_hook_cmd
-    notify_hook_cmd=$(echo "$current_settings" | jq -r '.hooks.Notification[0].hooks[0].command // ""' 2>/dev/null || echo "")
-    local stop_hook_cmd
-    stop_hook_cmd=$(echo "$current_settings" | jq -r '.hooks.Stop[0].hooks[0].command // ""' 2>/dev/null || echo "")
+    # Count our handlers before removal (any event, any matcher group)
+    local ours_count
+    ours_count=$(printf '%s' "$current_settings" | jq \
+        '[.hooks // {} | .[]? | .[]? | .hooks[]?
+          | select((.command // "") | tostring | contains("claude-notify/hooks/notify.sh"))]
+         | length' 2>/dev/null || echo "0")
 
-    local removed_notification=false
-    local removed_stop=false
+    if [[ "$ours_count" == "0" ]]; then
+        info "No Claude Notify hooks found to remove"
+    else
+        # Remove every handler group that references our script, preserving
+        # hooks owned by other tools.
+        current_settings=$(printf '%s' "$current_settings" | jq '
+            def ours: [.hooks[]?.command] | map(tostring) | join(" ")
+                      | contains("claude-notify/hooks/notify.sh");
+            if (.hooks | type) == "object" then
+                .hooks |= with_entries(
+                    .value |= (if type == "array" then map(select(ours | not)) else . end)
+                )
+            else . end
+        ')
 
-    # Remove Notification hook if it's ours
-    if [[ "$notify_hook_cmd" == *"claude-notify"* ]]; then
-        current_settings=$(echo "$current_settings" | jq 'del(.hooks.Notification)')
-        removed_notification=true
-        success "Removed Notification hook"
-    elif [[ -n "$notify_hook_cmd" ]]; then
-        warn "Notification hook exists but doesn't appear to be from Claude Notify, leaving it"
-    fi
+        # Drop events that no longer have any hook groups
+        current_settings=$(printf '%s' "$current_settings" | jq '
+            if (.hooks | type) == "object" then
+                .hooks |= with_entries(select((.value | type) == "array" and (.value | length) > 0))
+            else . end
+        ')
 
-    # Remove Stop hook if it's ours
-    if [[ "$stop_hook_cmd" == *"claude-notify"* ]]; then
-        current_settings=$(echo "$current_settings" | jq 'del(.hooks.Stop)')
-        removed_stop=true
-        success "Removed Stop hook"
-    elif [[ -n "$stop_hook_cmd" ]]; then
-        warn "Stop hook exists but doesn't appear to be from Claude Notify, leaving it"
+        success "Removed Claude Notify hooks ($ours_count handler(s))"
     fi
 
     # Clean up empty hooks object
     local hooks_count
-    hooks_count=$(echo "$current_settings" | jq '.hooks | length' 2>/dev/null || echo "0")
+    hooks_count=$(printf '%s' "$current_settings" | jq '.hooks | length' 2>/dev/null || echo "0")
     if [[ "$hooks_count" == "0" ]]; then
-        current_settings=$(echo "$current_settings" | jq 'del(.hooks)')
+        current_settings=$(printf '%s' "$current_settings" | jq 'del(.hooks)')
     fi
 
     # Write updated settings
-    echo "$current_settings" | jq '.' > "$CLAUDE_SETTINGS"
-
-    if [[ "$removed_notification" == true || "$removed_stop" == true ]]; then
-        success "Claude Code hooks cleaned up"
-    else
-        info "No Claude Notify hooks found to remove"
-    fi
+    printf '%s' "$current_settings" | jq '.' > "$CLAUDE_SETTINGS"
 }
 
 # Remove configuration files
