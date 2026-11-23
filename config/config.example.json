@@ -1,0 +1,23 @@
+{
+  "icon": "~/.local/share/icons/claude-ai.png",
+  "notifications": {
+    "input_needed": {
+      "enabled": true,
+      "title": "Claude Code",
+      "message": "Claude needs your input",
+      "urgency": "normal"
+    },
+    "task_complete": {
+      "enabled": true,
+      "title": "Claude Code",
+      "message": "Task completed",
+      "urgency": "low"
+    },
+    "error": {
+      "enabled": true,
+      "title": "Claude Code",
+      "message": "An error occurred",
+      "urgency": "critical"
+    }
+  }
+}
