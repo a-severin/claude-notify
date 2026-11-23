@@ -56,12 +56,6 @@ declare -A PRESET_CATEGORIES=(
     [error]="im.error"
 )
 
-declare -A PRESET_ACTIONS=(
-    [input]="view=View in Terminal"
-    [complete]="view=View in Terminal"
-    [error]="view=View Error"
-)
-
 # Parse command line arguments
 TYPE=""
 TITLE=""
@@ -70,7 +64,6 @@ URGENCY=""
 ICON=""
 CATEGORY=""
 ACTION=""
-WAIT_FOR_ACTION=false
 TEST_MODE=false
 VALIDATE_MODE=false
 VALIDATE_FILE=""
@@ -112,10 +105,6 @@ while [[ $# -gt 0 ]]; do
             ACTION="$2"
             shift 2
             ;;
-        --wait|-w)
-            WAIT_FOR_ACTION=true
-            shift
-            ;;
         --test)
             TEST_MODE=true
             shift
@@ -155,7 +144,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --icon, -i PATH      Path to icon file"
             echo "  --category, -c CAT   Notification category (e.g., im.received)"
             echo "  --action, -a ACTION  Add action button (format: id=Label)"
-            echo "  --wait, -w           Wait for action response"
             echo "  --test               Send a test notification"
             echo "  --demo               Render using a synthetic hook payload (prototype)"
             echo "  --preview            Print the rendered title and body"
@@ -315,6 +303,103 @@ cfg_bool() {
     fi
 
     [[ "$default" == "true" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Click to focus
+#
+# Notification daemons that honour the freedesktop spec invoke the "default"
+# action when the notification body is clicked (GNOME, dunst and mako all do).
+# When we can work out how to raise the window that owns the session, we attach
+# that action and wait for the click in a detached helper, so the hook returns
+# immediately and never blocks Claude Code.
+# ---------------------------------------------------------------------------
+
+FOCUS_READY=false
+FOCUS_COMMAND=""
+FOCUS_LABEL="Focus"
+FOCUS_CWD=""
+FOCUS_SESSION_ID=""
+
+# Substitute {cwd}, {session_id} and {title} with shell-quoted values.
+render_focus_command() {
+    local cmd="$1" cwd="$2" sid="$3" title="$4"
+    local cwd_q sid_q title_q
+    cwd_q=$(printf '%q' "$cwd")
+    sid_q=$(printf '%q' "$sid")
+    title_q=$(printf '%q' "$title")
+    cmd="${cmd//\{cwd\}/$cwd_q}"
+    cmd="${cmd//\{session_id\}/$sid_q}"
+    cmd="${cmd//\{title\}/$title_q}"
+    printf '%s' "$cmd"
+}
+
+# Work out how to raise the window that owns this session. A configured
+# focus.command always wins; otherwise we auto-detect VS Code, where
+# `code <folder>` focuses the window that already has the folder open.
+resolve_focus() {
+    FOCUS_READY=false
+    FOCUS_COMMAND=""
+
+    FOCUS_CWD=$(hook_get '.cwd // empty')
+    if [[ -z "$FOCUS_CWD" ]]; then
+        FOCUS_CWD="$PWD"
+    fi
+    FOCUS_SESSION_ID=$(hook_get '.session_id // empty')
+
+    FOCUS_LABEL=$(cfg '.focus.action_label' 'Focus')
+    if [[ -z "$FOCUS_LABEL" ]]; then
+        FOCUS_LABEL="Focus"
+    fi
+
+    cfg_bool '.focus.enabled' 'true' || return 0
+
+    # Only the user's global config may define a command to execute. A project
+    # config is merged in from the working tree, so honouring a focus command
+    # from there would let a repository run arbitrary code on a notification
+    # click. Auto-detection below is safe to take from the merged config.
+    local cmd=""
+    if [[ -f "$CONFIG_FILE" ]] && command -v jq &>/dev/null; then
+        cmd=$(jq -r '.focus.command // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    fi
+    if [[ -n "$cmd" ]]; then
+        FOCUS_COMMAND=$(render_focus_command "$cmd" "$FOCUS_CWD" "$FOCUS_SESSION_ID" "$TITLE")
+        FOCUS_READY=true
+        return 0
+    fi
+
+    cfg_bool '.focus.auto_detect' 'true' || return 0
+
+    if [[ -n "${VSCODE_IPC_HOOK:-}${VSCODE_IPC_HOOK_CLI:-}${VSCODE_PID:-}" \
+        || "${TERM_PROGRAM:-}" == "vscode" \
+        || "${CLAUDE_CODE_ENTRYPOINT:-}" == "claude-vscode" ]]; then
+        if command -v code &>/dev/null && [[ -d "$FOCUS_CWD" ]]; then
+            FOCUS_COMMAND="code $(printf '%q' "$FOCUS_CWD")"
+            FOCUS_READY=true
+        fi
+    fi
+}
+
+# Launch notify-send in its own session and run focus_command if the user
+# activates the notification's default action. All file descriptors are
+# redirected so the hook's pipes close and Claude Code is not kept waiting.
+spawn_focus_waiter() {
+    local focus_command="$1"; shift
+    local -a args=("$@")
+    local waiter='
+action=$(notify-send "$@" 2>/dev/null || true)
+if [ "$action" = "default" ] && [ -n "${CLAUDE_NOTIFY_FOCUS_CMD:-}" ]; then
+    setsid bash -c "$CLAUDE_NOTIFY_FOCUS_CMD" </dev/null >/dev/null 2>&1 || \
+        bash -c "$CLAUDE_NOTIFY_FOCUS_CMD" </dev/null >/dev/null 2>&1 || true
+fi'
+
+    if command -v setsid &>/dev/null; then
+        CLAUDE_NOTIFY_FOCUS_CMD="$focus_command" \
+            setsid -f bash -c "$waiter" _ "${args[@]}" </dev/null >/dev/null 2>&1 || true
+    else
+        ( CLAUDE_NOTIFY_FOCUS_CMD="$focus_command" \
+            bash -c "$waiter" _ "${args[@]}" </dev/null >/dev/null 2>&1 & ) || true
+    fi
 }
 
 # Load configuration
@@ -701,16 +786,18 @@ compose_notification() {
 }
 
 # Send notification via notify-send (Linux)
+# Actionable notifications are handed to a detached waiter so the hook never
+# blocks; notifications without actions are sent synchronously.
 send_notify_send() {
     local title="$1"
     local message="$2"
     local urgency="${3:-normal}"
     local icon="$4"
     local category="${5:-}"
-    local action="${6:-}"
-    local wait_for_action="${7:-false}"
+    local focus_command="$6"
+    shift 6
 
-    local args=()
+    local -a args=()
     args+=("--urgency=$urgency")
 
     if [[ -n "$icon" ]]; then
@@ -728,28 +815,29 @@ send_notify_send() {
         args+=("--category=$category")
     fi
 
-    # Add action buttons (only if waiting, since --action blocks)
-    if [[ "$wait_for_action" == true ]]; then
-        if [[ -n "$action" ]]; then
-            args+=("--action=$action")
-        fi
-        args+=("--wait")
-    fi
+    local action
+    for action in "$@"; do
+        [[ -n "$action" ]] && args+=("--action=$action")
+    done
 
     args+=("--app-name=Claude Code")
     args+=("$title")
     args+=("$message")
 
-    local result
-    if ! result=$(notify-send "${args[@]}" 2>&1); then
-        echo "notify-send failed: ${result:-unknown error}" >&2
-        return 1
+    # No actions: plain fire-and-forget notification.
+    if [[ $# -eq 0 ]]; then
+        local result
+        if ! result=$(notify-send "${args[@]}" 2>&1); then
+            echo "notify-send failed: ${result:-unknown error}" >&2
+            return 1
+        fi
+        return 0
     fi
 
-    # Return the clicked action (if any)
-    if [[ -n "$result" ]]; then
-        echo "$result"
-    fi
+    # With actions, notify-send waits for the user; run it detached.
+    spawn_focus_waiter "$focus_command" "${args[@]}" \
+        || echo "notify-send could not be started" >&2
+    return 0
 }
 
 # Main function
@@ -822,9 +910,6 @@ main() {
         if [[ -z "$CATEGORY" ]]; then
             CATEGORY="${PRESET_CATEGORIES[$TYPE]:-}"
         fi
-        if [[ -z "$ACTION" ]]; then
-            ACTION="${PRESET_ACTIONS[$TYPE]:-}"
-        fi
     fi
 
     # Compose content from the hook payload and local context
@@ -832,10 +917,18 @@ main() {
         compose_notification
     fi
 
+    # Decide how a click on the notification should raise the session window
+    resolve_focus
+
     if [[ "$PREVIEW_MODE" == true ]]; then
         printf 'TITLE │ %s\n' "$TITLE"
         printf 'BODY  │\n'
         printf '%s\n' "$MESSAGE" | sed 's/^/      │ /'
+        if [[ "$FOCUS_READY" == true ]]; then
+            printf 'FOCUS │ %s\n' "$FOCUS_COMMAND"
+        else
+            printf 'FOCUS │ (disabled)\n'
+        fi
         printf '%s\n' '------'
     fi
 
@@ -848,6 +941,15 @@ main() {
     # Set defaults
     URGENCY="${URGENCY:-$DEFAULT_URGENCY}"
 
+    # Build the action list: any user-supplied action plus "click to focus".
+    local -a notify_actions=()
+    if [[ -n "$ACTION" ]]; then
+        notify_actions+=("$ACTION")
+    fi
+    if [[ "$FOCUS_READY" == true ]]; then
+        notify_actions+=("default=${FOCUS_LABEL}")
+    fi
+
     # notify-send is the only supported backend
     if ! command -v notify-send &>/dev/null; then
         echo "Warning: notify-send not found. Install libnotify to receive desktop notifications." >&2
@@ -856,7 +958,7 @@ main() {
 
     # Hook invocations must not report errors to Claude Code; a failed
     # notification is not a reason to add a hook-error notice to the session.
-    if ! send_notify_send "$TITLE" "$MESSAGE" "$URGENCY" "$ICON" "$CATEGORY" "$ACTION" "$WAIT_FOR_ACTION"; then
+    if ! send_notify_send "$TITLE" "$MESSAGE" "$URGENCY" "$ICON" "$CATEGORY" "$FOCUS_COMMAND" "${notify_actions[@]}"; then
         if [[ "$TEST_MODE" == true ]]; then
             exit 1
         fi
@@ -864,7 +966,11 @@ main() {
     fi
 
     if [[ "$TEST_MODE" == true ]]; then
-        echo "Test notification sent via notify-send"
+        if [[ "$FOCUS_READY" == true ]]; then
+            echo "Test notification sent via notify-send (click it to focus)"
+        else
+            echo "Test notification sent via notify-send"
+        fi
     fi
 }
 

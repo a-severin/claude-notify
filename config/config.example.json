@@ -8,6 +8,12 @@
     "show_session_title": true,
     "max_detail_length": 160
   },
+  "focus": {
+    "enabled": true,
+    "auto_detect": true,
+    "action_label": "Focus",
+    "command": ""
+  },
   "notifications": {
     "input_needed": {
       "enabled": true,

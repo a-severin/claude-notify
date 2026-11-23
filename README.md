@@ -5,6 +5,7 @@ Linux desktop notifications for [Claude Code](https://docs.anthropic.com/en/docs
 ## Features
 
 - **Desktop Notifications** — Native Linux notifications via `notify-send` (libnotify)
+- **Click to focus** — Click a notification to raise the terminal or VS Code window that owns the session
 - **Contextual content** — Each notification shows the project, git branch, session, and the specific tool call, final message, or error that needs attention
 - **Customizable** — Configure icons, urgency, notification content, and context lines
 - **Non-intrusive** — Uses Claude Code's built-in hooks system
@@ -75,6 +76,12 @@ Claude Notify reads its configuration from `~/.config/claude-notify/config.json`
     "show_session_title": true,
     "max_detail_length": 160
   },
+  "focus": {
+    "enabled": true,
+    "auto_detect": true,
+    "action_label": "Focus",
+    "command": ""
+  },
   "notifications": {
     "input_needed": {
       "enabled": true,
@@ -109,6 +116,10 @@ Claude Notify reads its configuration from `~/.config/claude-notify/config.json`
 | `context.show_session`       | bool   | `true`        | Include the session short ID                       |
 | `context.show_session_title` | bool   | `true`        | Include the session title (or last prompt excerpt) |
 | `context.max_detail_length`  | int    | `160`         | Max characters for the event detail line           |
+| `focus.enabled`              | bool   | `true`        | Attach a "click to focus" action to notifications  |
+| `focus.auto_detect`          | bool   | `true`        | Detect VS Code from the environment and focus its window |
+| `focus.action_label`         | string | `"Focus"`     | Label shown by daemons that render action buttons  |
+| `focus.command`              | string | `""`          | Custom focus command; overrides auto-detection. Supports `{cwd}`, `{session_id}`, `{title}` |
 | `notifications.*.enabled`    | bool   | `true`        | Enable/disable a notification type                 |
 | `notifications.*.title`      | string | varies        | Notification title (used when `context.enabled` is `false`) |
 | `notifications.*.message`    | string | varies        | Notification message (fallback detail line)        |
@@ -136,6 +147,26 @@ BODY  │
 The session title comes from Claude Code's `session_title` field when present, otherwise from the transcript's generated title, otherwise from the last prompt. The latter two are internal transcript details and may lag or change between Claude Code versions.
 
 Set `context.enabled` to `false` to fall back to the static per-type `title`/`message` values.
+
+### Click to focus
+
+Notifications carry a freedesktop `default` action, which GNOME, dunst and mako invoke when you click the notification body (daemons that render action buttons show it as **Focus**). Clicking raises the window that owns the session.
+
+Auto-detection covers VS Code. When the hook runs from VS Code — either the Claude Code extension or its integrated terminal — and `code` is on `PATH`, clicking runs `code <session directory>`, which focuses the window that already has that folder open. That goes through VS Code's own IPC, so it also works on Wayland, where generic window tools cannot raise other applications.
+
+For other terminals, set `focus.command` to a template; `{cwd}`, `{session_id}` and `{title}` are substituted as shell-quoted values:
+
+```json
+{
+  "focus": {
+    "command": "code {cwd}"
+  }
+}
+```
+
+Set `focus.enabled` to `false` for plain notifications with no action. The click is handled by a detached helper, so `notify-send` can wait for the click without ever blocking the hook or Claude Code.
+
+`focus.command` is read from the global config only. A project `.claude-notify.json` can adjust the other focus settings but cannot inject a command to execute, since project configs come from the working tree.
 
 ### Environment Variables
 
@@ -201,7 +232,6 @@ Once installed, Claude Notify runs automatically through Claude Code's hooks. No
 --icon, -i PATH      Path to icon file
 --category, -c CAT   Notification category (e.g., im.received)
 --action, -a ACTION  Add an action button (format: id=Label)
---wait, -w           Wait for an action response
 --test               Send a test notification
 --demo               Render using a synthetic hook payload
 --preview            Print the rendered title and body
@@ -334,6 +364,7 @@ This will:
 
 - **Local only** — notifications are delivered through the local desktop notification daemon. No network requests are made.
 - **Path validation** — project config files are only loaded from within the user's home directory.
+- **No project-supplied commands** — only the global config can set the command run on a notification click; project configs cannot execute code.
 - **Safe uninstall** — directory deletion is validated against the expected config path before removal.
 - **Settings backup** — the installer backs up `~/.claude/settings.json` before modification.
 
